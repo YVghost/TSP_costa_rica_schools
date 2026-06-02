@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Colegios Costa Rica — Ruta Óptima</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+  <style>
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    #app { display: flex; height: 100vh; }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: 340px; min-width: 340px;
+      height: 100vh; overflow: hidden;
+      background: #f8f9fa;
+      border-right: 1px solid #dee2e6;
+      display: flex; flex-direction: column;
+    }
+    #sidebar-header {
+      background: #b71c1c; color: white;
+      padding: 12px 14px 10px; flex-shrink: 0;
+    }
+    #sidebar-body { padding: 12px; flex: 1; overflow-y: auto; min-height: 0; }
+
+    /* ── Start-point panel ── */
+    #start-panel {
+      background: #e8f5e9; border: 1px solid #a5d6a7;
+      border-radius: 6px; padding: 8px 10px; margin-bottom: 10px;
+    }
+
+    /* ── School list ── */
+    #school-list {
+      max-height: 32vh; overflow-y: auto;
+      border: 1px solid #dee2e6; border-radius: 6px; background: white;
+    }
+    .school-item {
+      padding: 6px 10px; cursor: pointer;
+      border-bottom: 1px solid #f3f3f3;
+      user-select: none; transition: background .1s;
+    }
+    .school-item:last-child { border-bottom: none; }
+    .school-item:hover { background: #fff3e0; }
+    .school-item.selected { background: #fce4e4; border-left: 3px solid #e53935; }
+
+    /* ── Route panel ── */
+    #route-panel {
+      border-top: 2px solid #e53935; padding: 10px 12px;
+      background: white; flex-shrink: 0;
+    }
+    .stop-item { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px solid #f5f5f5; }
+    .stop-badge {
+      min-width: 24px; height: 24px; border-radius: 50%;
+      background: #e53935; color: white;
+      font-size: 11px; font-weight: bold;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .stop-badge.start { background: #2e7d32; }
+
+    /* ── Map ── */
+    #map { flex: 1; height: 100vh; }
+
+    /* Numbered waypoint icons */
+    .num-icon {
+      background: #e53935; border: 2px solid #b71c1c; border-radius: 50%;
+      color: white; font-weight: bold; font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px;
+    }
+    .start-icon-div {
+      background: #2e7d32; border: 2px solid #1b5e20; border-radius: 50%;
+      color: white; font-size: 15px;
+      display: flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px;
+    }
+  </style>
+</head>
+
+<body>
+<div id="app">
+
+  <!-- ══════════════════ SIDEBAR ══════════════════ -->
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <h6 class="mb-0 fw-bold"><i class="bi bi-geo-alt-fill me-1"></i>Colegios de Costa Rica</h6>
+      <small class="opacity-75">{{ total_colegios }} colegios con coordenadas</small>
+    </div>
+
+    <div id="sidebar-body">
+
+      <!-- ── Punto de partida ── -->
+      <div id="start-panel">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="small fw-semibold text-success">
+            <i class="bi bi-geo-fill me-1"></i>Punto de partida
+          </span>
+          <div>
+            <button id="btn-set-start" class="btn btn-outline-success btn-sm py-0 px-2" title="Activar modo: click en el mapa">
+              <i class="bi bi-cursor-fill"></i> Colocar
+            </button>
+            <button id="btn-clear-start" class="btn btn-outline-secondary btn-sm py-0 px-2 d-none" title="Quitar punto de partida">
+              <i class="bi bi-x"></i>
+            </button>
+          </div>
+        </div>
+        <div id="start-hint" class="small text-muted">
+          Hacé click en «Colocar» y luego en el mapa para fijar el inicio de la ruta.
+        </div>
+        <div id="start-coords" class="small text-success fw-semibold d-none"></div>
+      </div>
+
+      <!-- ── Filters ── -->
+      <div class="mb-2">
+        <label class="form-label small fw-semibold mb-1">Provincia</label>
+        <select id="provincia-select" class="form-select form-select-sm">
+          <option value="">Todas las provincias</option>
+          {% for p in provincias %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="mb-2">
+        <div class="input-group input-group-sm">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="text" id="search-input" class="form-control" placeholder="Buscar por nombre…">
+          <button class="btn btn-outline-secondary" id="clear-search" type="button">
+            <i class="bi bi-x"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- School count + clear selection -->
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <span id="count-label" class="small text-muted">Cargando…</span>
+        <button class="btn btn-link btn-sm text-secondary p-0 small" id="clear-all">Limpiar selección</button>
+      </div>
+
+      <!-- School list -->
+      <div id="school-list">
+        <div class="p-3 text-center text-muted small">Cargando colegios…</div>
+      </div>
+
+      <!-- Calculate button -->
+      <div class="mt-2">
+        <div id="sel-info" class="small text-muted mb-1 text-center">
+          Seleccioná al menos 2 colegios
+        </div>
+        <button id="calc-btn" class="btn btn-danger btn-sm w-100" disabled>
+          <i class="bi bi-signpost-2-fill me-1"></i>Calcular Ruta Óptima
+        </button>
+      </div>
+
+    </div><!-- /sidebar-body -->
+
+    <!-- ── Route result ── -->
+    <div id="route-panel" class="d-none">
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <h6 class="mb-0 text-danger fw-bold"><i class="bi bi-map-fill me-1"></i>Ruta Óptima</h6>
+        <button class="btn btn-sm btn-outline-secondary" id="clear-route" title="Limpiar ruta">
+          <i class="bi bi-arrow-counterclockwise"></i>
+        </button>
+      </div>
+      <div id="route-meta" class="small mb-2"></div>
+      <div id="route-stops" style="max-height: 28vh; overflow-y: auto;"></div>
+    </div>
+
+  </div><!-- /sidebar -->
+
+  <!-- ══════════════════ MAP ══════════════════ -->
+  <div id="map"></div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── State ──────────────────────────────────────────────────────────
+  let allSchools = [];
+  const selected = new Set();
+  let markerLayer = L.layerGroup();
+  let routeLayer  = null;
+
+  // Starting-point state
+  let startMarker  = null;
+  let startPoint   = null;   // {lat, lon} or null
+  let settingStart = false;
+
+  // ── Map ────────────────────────────────────────────────────────────
+  const map = L.map('map', { zoomControl: true }).setView([9.95, -84.2], 8);
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+    subdomains: 'abcd', maxZoom: 19,
+  }).addTo(map);
+
+  markerLayer.addTo(map);
+
+  // ── Custom icons ───────────────────────────────────────────────────
+  function numIcon(n) {
+    return L.divIcon({
+      className: '',
+      html: `<div class="num-icon">${n}</div>`,
+      iconSize: [26, 26], iconAnchor: [13, 13],
+    });
+  }
+
+  const startLeafletIcon = L.divIcon({
+    className: '',
+    html: '<div class="start-icon-div">★</div>',
+    iconSize: [28, 28], iconAnchor: [14, 14],
+  });
+
+  // ── Fetch schools ──────────────────────────────────────────────────
+  async function fetchSchools(provincia = '', q = '') {
+    const params = new URLSearchParams();
+    if (provincia) params.set('provincia', provincia);
+    if (q) params.set('q', q);
+    const res  = await fetch(`/api/colegios/?${params}`);
+    const data = await res.json();
+    allSchools = data.colegios;
+    document.getElementById('count-label').textContent =
+      `${data.count} colegio${data.count !== 1 ? 's' : ''}`;
+    renderMarkers();
+    renderList();
+  }
+
+  // ── Render markers ─────────────────────────────────────────────────
+  function schoolStyle(isSel) {
+    return isSel
+      ? { radius: 9,  color: '#b71c1c', fillColor: '#e53935', fillOpacity: 1,   weight: 2 }
+      : { radius: 5,  color: '#1565c0', fillColor: '#1976d2', fillOpacity: 0.55, weight: 1 };
+  }
+
+  function renderMarkers() {
+    markerLayer.clearLayers();
+    allSchools.forEach(s => {
+      const isSel = selected.has(s.nombre);
+      const m = L.circleMarker([s.lat, s.lon], schoolStyle(isSel));
+      m.bindPopup(
+        `<b>${esc(s.nombre)}</b><br>` +
+        `<span class="text-muted">${esc(s.canton)}, ${esc(s.provincia)}</span>` +
+        (isSel ? '<br><em style="color:#e53935">✓ Seleccionado</em>' : '')
+      );
+      m.on('click', () => toggleSelect(s.nombre));
+      markerLayer.addLayer(m);
+    });
+  }
+
+  // ── Render sidebar list ────────────────────────────────────────────
+  function renderList() {
+    const el = document.getElementById('school-list');
+    if (!allSchools.length) {
+      el.innerHTML = '<div class="p-3 text-center text-muted small">Sin resultados</div>';
+      return;
+    }
+    el.innerHTML = '';
+    allSchools.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'school-item' + (selected.has(s.nombre) ? ' selected' : '');
+      div.dataset.nombre = s.nombre;
+      div.innerHTML =
+        `<div class="d-flex justify-content-between align-items-center">` +
+        `<div>` +
+        `<div class="small fw-semibold">${esc(s.nombre)}</div>` +
+        `<div class="text-muted" style="font-size:11px">${esc(s.canton)} · ${esc(s.provincia)}</div>` +
+        `</div>` +
+        (selected.has(s.nombre)
+          ? `<i class="bi bi-check-circle-fill text-danger"></i>`
+          : `<i class="bi bi-circle text-secondary"></i>`) +
+        `</div>`;
+      div.addEventListener('click', () => toggleSelect(s.nombre));
+      el.appendChild(div);
+    });
+  }
+
+  function toggleSelect(nombre) {
+    if (selected.has(nombre)) {
+      selected.delete(nombre);
+    } else {
+      if (selected.size >= 14) { alert('Máximo 14 colegios.'); return; }
+      selected.add(nombre);
+    }
+    updateSelUI();
+    renderMarkers();
+    renderList();
+  }
+
+  function updateSelUI() {
+    const n   = selected.size;
+    const inf = document.getElementById('sel-info');
+    const btn = document.getElementById('calc-btn');
+    if (n === 0) {
+      inf.textContent = 'Seleccioná al menos 2 colegios';
+      btn.disabled = true;
+    } else if (n === 1) {
+      inf.textContent = '1 colegio — falta al menos uno más';
+      btn.disabled = true;
+    } else {
+      inf.innerHTML = `<span class="badge bg-danger">${n}</span> colegios seleccionados`;
+      btn.disabled = false;
+    }
+  }
+
+  // ── Starting-point logic ───────────────────────────────────────────
+  document.getElementById('btn-set-start').addEventListener('click', () => {
+    settingStart = !settingStart;
+    map.getContainer().style.cursor = settingStart ? 'crosshair' : '';
+    document.getElementById('start-hint').textContent = settingStart
+      ? '📍 Hacé click en el mapa para colocar el inicio…'
+      : 'Hacé click en «Colocar» y luego en el mapa para fijar el inicio de la ruta.';
+  });
+
+  document.getElementById('btn-clear-start').addEventListener('click', clearStart);
+
+  function clearStart() {
+    if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+    startPoint   = null;
+    settingStart = false;
+    map.getContainer().style.cursor = '';
+    document.getElementById('start-coords').classList.add('d-none');
+    document.getElementById('btn-clear-start').classList.add('d-none');
+    document.getElementById('start-hint').textContent =
+      'Hacé click en «Colocar» y luego en el mapa para fijar el inicio de la ruta.';
+  }
+
+  map.on('click', function (e) {
+    if (!settingStart) return;
+    placeStart(e.latlng.lat, e.latlng.lng);
+    settingStart = false;
+    map.getContainer().style.cursor = '';
+  });
+
+  function placeStart(lat, lon) {
+    if (startMarker) map.removeLayer(startMarker);
+    startPoint = { lat, lon };
+    startMarker = L.marker([lat, lon], { icon: startLeafletIcon, draggable: true })
+      .addTo(map)
+      .bindPopup('<b>Punto de partida</b><br><small>Arrastrá para mover</small>');
+    startMarker.on('dragend', e => {
+      const p = e.target.getLatLng();
+      startPoint = { lat: p.lat, lon: p.lng };
+      document.getElementById('start-coords').textContent =
+        `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
+    });
+    document.getElementById('start-coords').textContent =
+      `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+    document.getElementById('start-coords').classList.remove('d-none');
+    document.getElementById('btn-clear-start').classList.remove('d-none');
+    document.getElementById('start-hint').textContent =
+      'Punto colocado. Arrastralo para ajustar.';
+  }
+
+  // ── Calculate route ────────────────────────────────────────────────
+  document.getElementById('calc-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('calc-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Calculando…';
+
+    try {
+      const body = { nombres: [...selected] };
+      if (startPoint) body.punto_partida = { ...startPoint, label: 'Punto de partida' };
+
+      const res  = await fetch('/api/ruta/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || 'Error'); return; }
+      displayRoute(data);
+    } catch (_) {
+      alert('Error de conexión');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-signpost-2-fill me-1"></i>Calcular Ruta Óptima';
+    }
+  });
+
+  // ── Display route ──────────────────────────────────────────────────
+  function displayRoute(data) {
+    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    routeLayer = L.layerGroup();
+
+    // Road geometry if available, otherwise straight dashed line
+    const lineCoords = data.geometry || data.ruta.map(s => [s.lat, s.lon]);
+    const lineOpts   = data.usando_calles
+      ? { color: '#e53935', weight: 4, opacity: 0.9 }
+      : { color: '#e53935', weight: 4, opacity: 0.85, dashArray: '12 6' };
+
+    L.polyline(lineCoords, lineOpts).addTo(routeLayer);
+
+    // Numbered / start markers
+    data.ruta.forEach(stop => {
+      const icon = stop.es_inicio
+        ? startLeafletIcon
+        : numIcon(stop.orden);
+      const popup = stop.es_inicio
+        ? `<b>★ ${esc(stop.nombre)}</b>`
+        : `<b>${stop.orden}. ${esc(stop.nombre)}</b><br>${esc(stop.canton)}, ${esc(stop.provincia)}`;
+      L.marker([stop.lat, stop.lon], { icon })
+        .bindPopup(popup)
+        .addTo(routeLayer);
+    });
+
+    routeLayer.addTo(map);
+    map.fitBounds(L.polyline(lineCoords).getBounds(), { padding: [40, 40] });
+
+    // Sidebar summary
+    document.getElementById('route-panel').classList.remove('d-none');
+
+    const streetBadge = data.usando_calles
+      ? '<span class="badge bg-success ms-1">calles reales</span>'
+      : '<span class="badge bg-secondary ms-1">línea recta</span>';
+
+    document.getElementById('route-meta').innerHTML =
+      `<span class="badge bg-danger" style="font-size:.95em">${data.total_km} km</span>${streetBadge}<br>` +
+      `<span class="text-muted">${esc(data.algoritmo)}</span>`;
+
+    const stopsEl = document.getElementById('route-stops');
+    stopsEl.innerHTML = '';
+    data.ruta.forEach(stop => {
+      const div = document.createElement('div');
+      div.className = 'stop-item';
+      if (stop.es_inicio) {
+        div.innerHTML =
+          `<div class="stop-badge start">★</div>` +
+          `<div><div class="small fw-semibold text-success">${esc(stop.nombre)}</div></div>`;
+      } else {
+        div.innerHTML =
+          `<div class="stop-badge">${stop.orden}</div>` +
+          `<div>` +
+          `<div class="small fw-semibold">${esc(stop.nombre)}</div>` +
+          `<div class="text-muted" style="font-size:11px">${esc(stop.canton)}, ${esc(stop.provincia)}</div>` +
+          `</div>`;
+      }
+      stopsEl.appendChild(div);
+    });
+  }
+
+  // ── Filter controls ────────────────────────────────────────────────
+  function loadFiltered() {
+    const prov = document.getElementById('provincia-select').value;
+    const q    = document.getElementById('search-input').value.trim();
+    fetchSchools(prov, q);
+  }
+
+  document.getElementById('provincia-select').addEventListener('change', () => {
+    // Clear selection when province changes to avoid cross-province confusion
+    selected.clear();
+    updateSelUI();
+    loadFiltered();
+  });
+
+  let searchTimer;
+  document.getElementById('search-input').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(loadFiltered, 280);
+  });
+
+  document.getElementById('clear-search').addEventListener('click', () => {
+    document.getElementById('search-input').value = '';
+    loadFiltered();
+  });
+
+  document.getElementById('clear-all').addEventListener('click', () => {
+    selected.clear();
+    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    document.getElementById('route-panel').classList.add('d-none');
+    updateSelUI();
+    renderMarkers();
+    renderList();
+  });
+
+  document.getElementById('clear-route').addEventListener('click', () => {
+    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    document.getElementById('route-panel').classList.add('d-none');
+  });
+
+  // ── Helper ─────────────────────────────────────────────────────────
+  function esc(s) {
+    if (!s) return '';
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────
+  fetchSchools();
+
+})();
+</script>
+</body>
+</html>
