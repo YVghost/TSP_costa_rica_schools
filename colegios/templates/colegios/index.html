@@ -155,6 +155,14 @@
         </button>
       </div>
 
+      <!-- ── Update data button ── -->
+      <div class="border-top pt-2 mt-3">
+        <button id="update-btn" class="btn btn-outline-secondary btn-sm w-100">
+          <i class="bi bi-arrow-clockwise me-1"></i>Actualizar datos MEP
+        </button>
+        <div id="update-status" class="small mt-1 d-none"></div>
+      </div>
+
     </div><!-- /sidebar-body -->
 
     <!-- ── Route result ── -->
@@ -492,6 +500,39 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
+
+  // ── Update data from MEP ArcGIS ───────────────────────────────────
+  document.getElementById('update-btn').addEventListener('click', async () => {
+    const btn    = document.getElementById('update-btn');
+    const status = document.getElementById('update-status');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Descargando de MEP…';
+    status.className = 'small mt-1 text-muted';
+    status.textContent = 'Conectando con ArcGIS…';
+    status.classList.remove('d-none');
+
+    try {
+      const res  = await fetch('/api/actualizar-datos/', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error desconocido');
+
+      status.className = 'small mt-1 text-success';
+      status.innerHTML =
+        `<i class="bi bi-check-circle-fill me-1"></i>` +
+        `<b>${data.total}</b> colegios actualizados ` +
+        `(${data.publicos} públicos · ${data.privados} privados)<br>` +
+        `<span class="text-muted">${data.archivo}</span>`;
+
+      // Reload the map with fresh data
+      loadFiltered();
+    } catch (e) {
+      status.className = 'small mt-1 text-danger';
+      status.innerHTML = `<i class="bi bi-x-circle-fill me-1"></i>${esc(e.message)}`;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Actualizar datos MEP';
+    }
+  });
 
   // ── Init ───────────────────────────────────────────────────────────
   fetchSchools();

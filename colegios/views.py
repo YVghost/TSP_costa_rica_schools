@@ -3,7 +3,7 @@ from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt
-from .utils import get_dataframe, solve_tsp, get_osrm_matrix, get_osrm_geometry
+from .utils import get_dataframe, solve_tsp, get_osrm_matrix, get_osrm_geometry, fetch_and_save_schools
 
 
 def index(request):
@@ -111,6 +111,17 @@ def api_ruta(request):
         'ruta': ruta,
         'total_km': round(total_km, 2),
         'algoritmo': algoritmo,
-        'geometry': geometry,       # list of [lat, lon] for Leaflet polyline, or null
+        'geometry': geometry,
         'usando_calles': usando_calles,
     })
+
+
+@csrf_exempt
+@require_POST
+def api_actualizar_datos(request):
+    """Fetch fresh school data from the MEP ArcGIS API and save to data/coordinates/."""
+    try:
+        summary = fetch_and_save_schools()
+        return JsonResponse(summary)
+    except Exception as exc:
+        return JsonResponse({'error': str(exc)}, status=500)

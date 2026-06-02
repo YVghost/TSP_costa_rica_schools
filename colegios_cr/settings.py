@@ -37,5 +37,8 @@ STATIC_URL = '/static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Path to the Excel data file
+# Path to the fallback Excel data file (original)
 EXCEL_DATA_PATH = BASE_DIR / 'Gonglomerados_colegios_ipec_cindea_coned.xlsx'
+
+# Directory where updated data from the MEP ArcGIS API is stored
+DATA_DIR = BASE_DIR / 'data' / 'coordinates'
