@@ -1,17 +1,38 @@
 import json
+import datetime
+from pathlib import Path
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
 from .utils import get_dataframe, solve_tsp, get_osrm_matrix, get_osrm_geometry, fetch_and_save_schools
+
+
+def _data_source_info():
+    """Return info about which data file the app is currently using."""
+    latest = Path(settings.DATA_DIR) / 'colegios_cr_latest.xlsx'
+    if latest.exists():
+        mtime = datetime.datetime.fromtimestamp(latest.stat().st_mtime)
+        return {
+            'fuente': 'MEP ArcGIS',
+            'actualizado': mtime.strftime('%d/%m/%Y %H:%M'),
+            'es_original': False,
+        }
+    return {
+        'fuente': 'Excel original',
+        'actualizado': None,
+        'es_original': True,
+    }
 
 
 def index(request):
     df = get_dataframe()
-    provincias = sorted(df['provincia'].dropna().unique().tolist())
+    provincias = sorted(p for p in df['provincia'].unique() if p)
     return render(request, 'colegios/index.html', {
-        'provincias': provincias,
+        'provincias':     provincias,
         'total_colegios': len(df),
+        'data_info':      _data_source_info(),
     })
 
 
@@ -31,8 +52,9 @@ def api_colegios(request):
         ]
 
     records = (
-        filtered[['nombre', 'provincia', 'canton', 'zona', 'lat', 'lon']]
+        filtered[['nombre', 'provincia', 'canton', 'zona', 'direccion', 'lat', 'lon']]
         .sort_values('nombre')
+        .fillna('')          # NaN in any text column would break JSON serialization
         .to_dict('records')
     )
     return JsonResponse({'colegios': records, 'count': len(records)})

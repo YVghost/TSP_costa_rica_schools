@@ -1,4 +1,7 @@
+import json
 import math
+import re
+import unicodedata
 import pandas as pd
 import requests
 from datetime import datetime
@@ -11,17 +14,41 @@ LAT_MIN, LAT_MAX = 8.0, 11.5
 LON_MIN, LON_MAX = -87.0, -82.0
 OSRM_BASE = "http://router.project-osrm.org"
 
-# MEP ArcGIS FeatureServer layers
 _ARCGIS_LAYERS = {
-    'publico':  'https://services1.arcgis.com/aWQmxJWy7lM2Qqmo/ArcGIS/rest/services/CE_Publicos_CR/FeatureServer/1/query',
-    'privado':  'https://services1.arcgis.com/aWQmxJWy7lM2Qqmo/ArcGIS/rest/services/CE_Publicos_CR/FeatureServer/0/query',
+    'publico': 'https://services1.arcgis.com/aWQmxJWy7lM2Qqmo/ArcGIS/rest/services/CE_Publicos_CR/FeatureServer/1/query',
+    'privado': 'https://services1.arcgis.com/aWQmxJWy7lM2Qqmo/ArcGIS/rest/services/CE_Publicos_CR/FeatureServer/0/query',
+}
+
+# Known Costa Rica provinces — normalized to ASCII for consistent filtering
+_PROVINCE_KNOWN = {
+    'ALAJUELA': 'ALAJUELA',
+    'CARTAGO': 'CARTAGO',
+    'GUANACASTE': 'GUANACASTE',
+    'HEREDIA': 'HEREDIA',
+    'LIMON': 'LIMON', 'LIMN': 'LIMON',      # LIMÓN → stripped/corrupted
+    'PUNTARENAS': 'PUNTARENAS',
+    'SAN JOSE': 'SAN JOSE', 'SAN JOS': 'SAN JOSE',  # SAN JOSÉ → stripped/corrupted
 }
 
 
-# ── Coordinate normalization (legacy Excel format) ─────────────────────────────
+def _fix_province(s):
+    """
+    Normalize a Costa Rica province name to clean ASCII.
+    Handles accented (LIMÓN), replacement-char corrupted (LIM�N), and plain forms.
+    """
+    if not isinstance(s, str) or not s.strip():
+        return ''
+    # Remove Unicode replacement characters (�) left by bad encoding
+    s = re.sub(r'�+', '', s).strip().upper()
+    # Strip any remaining combining/accent characters
+    nfkd = unicodedata.normalize('NFKD', s)
+    s = ''.join(c for c in nfkd if not unicodedata.combining(c)).strip()
+    return _PROVINCE_KNOWN.get(s, s)
+
+
+# ── Coordinate normalization (legacy Excel integer format) ─────────────────────
 
 def _normalize(val, lo, hi):
-    """Convert integer-encoded coordinates to decimal degrees."""
     if pd.isna(val):
         return None
     for exp in range(9, -1, -1):
@@ -37,7 +64,7 @@ def _normalize(val, lo, hi):
 def get_dataframe():
     """
     Load school data from the freshest available source:
-    1. data/coordinates/colegios_cr_latest.xlsx  (from MEP ArcGIS API)
+    1. data/coordinates/colegios_cr_latest.xlsx  (MEP ArcGIS API)
     2. Original Excel fallback
     """
     data_dir = Path(settings.DATA_DIR)
@@ -50,7 +77,6 @@ def get_dataframe():
     df['lon'] = df['LONGITUD'].apply(lambda x: _normalize(x, LON_MIN, LON_MAX))
     df = df.dropna(subset=['lat', 'lon']).reset_index(drop=True)
 
-    # Rename to internal lowercase names (handle both old and new column sets)
     rename_map = {
         'NOMBRE':     'nombre',
         'PROVINCIA':  'provincia',
@@ -58,35 +84,58 @@ def get_dataframe():
         'DISTRITO':   'distrito',
         'ZONA':       'zona',
         'DEPENDENCIA':'dependencia',
+        'DIRECCION':  'direccion',
+        'POBLADO':    'poblado',
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # Fill any column that didn't exist in the source file
-    for col in ['nombre', 'provincia', 'canton', 'distrito', 'zona', 'dependencia']:
+    # Ensure all text columns exist, converting NaN → '' before str operations.
+    # Note: in pandas 3.x, astype(str) does NOT convert float NaN to 'nan'.
+    # fillna('') must come first.
+    for col in ['nombre', 'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'direccion', 'poblado']:
         if col not in df.columns:
             df[col] = ''
-        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].fillna('').astype(str).str.strip()
 
-    return df[['nombre', 'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'lat', 'lon']]
+    # Normalize province names (fixes accent/encoding corruption)
+    df['provincia'] = df['provincia'].apply(_fix_province)
+
+    # Build a single display address: direccion if present, else poblado
+    df['direccion'] = df.apply(
+        lambda r: r['direccion'] if r['direccion'] else r['poblado'], axis=1
+    )
+
+    return df[['nombre', 'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'direccion', 'lat', 'lon']]
 
 
 # ── MEP ArcGIS fetch & save ────────────────────────────────────────────────────
 
 def _fetch_layer(url, page_size=1000):
-    """Fetch all features from an ArcGIS FeatureServer layer, handling pagination."""
+    """
+    Fetch all features from an ArcGIS FeatureServer layer with pagination.
+    Falls back to Latin-1 decoding if the server returns non-UTF-8 encoded JSON.
+    """
     features = []
     offset   = 0
+    params   = {
+        'where': '1=1', 'outFields': '*',
+        'returnGeometry': 'true', 'outSR': '4326', 'f': 'json',
+        'resultRecordCount': page_size,
+    }
     while True:
-        resp = requests.get(url, params={
-            'where':             '1=1',
-            'outFields':         '*',
-            'returnGeometry':    'true',
-            'outSR':             '4326',
-            'f':                 'json',
-            'resultOffset':      offset,
-            'resultRecordCount': page_size,
-        }, timeout=30)
-        data  = resp.json()
+        params['resultOffset'] = offset
+        resp = requests.get(url, params=params, timeout=30)
+
+        # ArcGIS servers sometimes send Latin-1 bytes in an otherwise UTF-8 response.
+        # Detect by checking for replacement characters after UTF-8 decode.
+        try:
+            text = resp.content.decode('utf-8')
+            if '�' in text:
+                raise UnicodeDecodeError('utf-8', b'', 0, 1, 'replacement char')
+        except UnicodeDecodeError:
+            text = resp.content.decode('latin-1')
+
+        data  = json.loads(text)
         batch = data.get('features', [])
         features.extend(batch)
         if not data.get('exceededTransferLimit', False) or not batch:
@@ -96,39 +145,38 @@ def _fetch_layer(url, page_size=1000):
 
 
 def _feature_to_row(feature, fuente):
-    """Flatten a GeoJSON feature into a flat dict with standardized column names."""
-    geom  = feature.get('geometry', {})
-    attrs = feature.get('attributes', {})
-    # geometry.x / geometry.y are always decimal degrees when outSR=4326
+    """Flatten an ArcGIS feature into a flat dict with standardized column names."""
+    geom  = feature.get('geometry') or {}
+    attrs = feature.get('attributes') or {}
     return {
-        'NOMBRE':     attrs.get('CENTRO_EDU', ''),
-        'PROVINCIA':  attrs.get('PROVINCIA', ''),
-        'CANTON':     attrs.get('CANTON', ''),
-        'DISTRITO':   attrs.get('DISTRITO', ''),
-        'POBLADO':    attrs.get('POBLADO', ''),
-        'TIPO':       attrs.get('TIPO_INSTI', ''),
-        'ESTADO':     attrs.get('ESTADO', ''),
-        'REGIONAL':   attrs.get('REGIONAL', ''),
-        'CIRCUITO':   attrs.get('CIRCUITO', ''),
-        'LATITUD':    geom.get('y'),   # decimal degrees — _normalize handles 10^0
-        'LONGITUD':   geom.get('x'),
-        'FUENTE':     fuente,
+        'NOMBRE':    attrs.get('CENTRO_EDU') or '',
+        'PROVINCIA': attrs.get('PROVINCIA') or '',
+        'CANTON':    attrs.get('CANTON') or '',
+        'DISTRITO':  attrs.get('DISTRITO') or '',
+        'POBLADO':   attrs.get('POBLADO') or '',
+        'DIRECCION': attrs.get('DIRECCION') or '',
+        'TIPO':      attrs.get('TIPO_INSTI') or '',
+        'ESTADO':    attrs.get('ESTADO') or '',
+        'REGIONAL':  attrs.get('REGIONAL') or '',
+        'CIRCUITO':  attrs.get('CIRCUITO') or '',
+        'LATITUD':   geom.get('y'),   # already decimal degrees (outSR=4326)
+        'LONGITUD':  geom.get('x'),
+        'FUENTE':    fuente,
     }
 
 
 def fetch_and_save_schools():
     """
-    Download all schools from the MEP ArcGIS API, save two Excel files:
-      - data/coordinates/colegios_cr_<timestamp>.xlsx  (historical record)
-      - data/coordinates/colegios_cr_latest.xlsx       (used by the app)
-
+    Download all schools from the MEP ArcGIS API and save:
+      - data/coordinates/colegios_cr_<timestamp>.xlsx  (historical)
+      - data/coordinates/colegios_cr_latest.xlsx        (used by the app)
     Returns a summary dict.
     """
     rows   = []
     counts = {}
 
     for fuente, url in _ARCGIS_LAYERS.items():
-        batch       = _fetch_layer(url)
+        batch          = _fetch_layer(url)
         counts[fuente] = len(batch)
         rows.extend(_feature_to_row(f, fuente) for f in batch)
 
@@ -144,14 +192,13 @@ def fetch_and_save_schools():
     df.to_excel(timestamped, index=False)
     df.to_excel(latest,      index=False)
 
-    # Invalidate the cached dataframe so the next request loads fresh data
     get_dataframe.cache_clear()
 
     return {
-        'total':    len(df),
-        'publicos': counts.get('publico', 0),
-        'privados': counts.get('privado', 0),
-        'archivo':  timestamped.name,
+        'total':     len(df),
+        'publicos':  counts.get('publico', 0),
+        'privados':  counts.get('privado', 0),
+        'archivo':   timestamped.name,
         'timestamp': ts,
     }
 
@@ -159,16 +206,11 @@ def fetch_and_save_schools():
 # ── OSRM road-network calls ────────────────────────────────────────────────────
 
 def get_osrm_matrix(coords):
-    """
-    Road-distance matrix (km) via OSRM Table API.
-    coords: list of (lat, lon) — OSRM expects lon,lat in the URL.
-    Returns n×n list of lists in km, or None if OSRM is unreachable.
-    """
+    """Road-distance matrix (km) via OSRM Table API. Returns None if unreachable."""
     coord_str = ";".join(f"{lon},{lat}" for lat, lon in coords)
     url = f"{OSRM_BASE}/table/v1/driving/{coord_str}?annotations=distance"
     try:
-        resp = requests.get(url, timeout=9)
-        data = resp.json()
+        data = requests.get(url, timeout=9).json()
         if data.get('code') == 'Ok':
             return [
                 [d / 1000 if d is not None else float('inf') for d in row]
@@ -182,14 +224,12 @@ def get_osrm_matrix(coords):
 def get_osrm_geometry(coords):
     """
     Actual road-route geometry via OSRM Route API.
-    coords: list of (lat, lon) in travel order.
-    Returns ([lat, lon] polyline points, total_km) or (None, None) on failure.
+    Returns ([lat, lon] polyline, total_km) or (None, None) on failure.
     """
     coord_str = ";".join(f"{lon},{lat}" for lat, lon in coords)
     url = f"{OSRM_BASE}/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
     try:
-        resp = requests.get(url, timeout=9)
-        data = resp.json()
+        data = requests.get(url, timeout=9).json()
         if data.get('code') == 'Ok':
             route    = data['routes'][0]
             pts      = [[lat, lon] for lon, lat in route['geometry']['coordinates']]
@@ -205,26 +245,20 @@ def get_osrm_geometry(coords):
 def solve_tsp(coords, dist_matrix=None):
     """
     Returns (ordered_indices, total_km, algorithm_name).
-    Index 0 is always the fixed start point.
-    Uses brute-force (exact) for n ≤ 10, nearest-neighbor heuristic otherwise.
+    Index 0 is the fixed start. Brute-force for n ≤ 10, nearest-neighbor otherwise.
     """
     n = len(coords)
     if n <= 1:
         return list(range(n)), 0.0, "—"
 
     def dist(i, j):
-        if dist_matrix:
-            return dist_matrix[i][j]
-        return haversine(*coords[i], *coords[j])
+        return dist_matrix[i][j] if dist_matrix else haversine(*coords[i], *coords[j])
 
-    if n <= 10:
-        return _brute_force(n, dist)
-    return _nearest_neighbor(n, dist)
+    return _brute_force(n, dist) if n <= 10 else _nearest_neighbor(n, dist)
 
 
 def _brute_force(n, dist_fn):
-    best_d    = float('inf')
-    best_path = list(range(n))
+    best_d, best_path = float('inf'), list(range(n))
     for perm in permutations(range(1, n)):
         path = (0,) + perm
         d    = sum(dist_fn(path[i], path[i + 1]) for i in range(n - 1))
@@ -249,7 +283,6 @@ def _nearest_neighbor(n, dist_fn):
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371
     p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a  = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * R * math.asin(math.sqrt(a))

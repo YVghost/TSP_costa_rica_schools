@@ -64,6 +64,20 @@
     /* ── Map ── */
     #map { flex: 1; height: 100vh; }
 
+    /* Hover tooltip */
+    .school-tooltip {
+      background: white;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 6px 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.15);
+      font-size: 12px;
+      line-height: 1.5;
+      max-width: 260px;
+      pointer-events: none;
+    }
+    .school-tooltip::before { display: none; }
+
     /* Numbered waypoint icons */
     .num-icon {
       background: #e53935; border: 2px solid #b71c1c; border-radius: 50%;
@@ -87,7 +101,16 @@
   <div id="sidebar">
     <div id="sidebar-header">
       <h6 class="mb-0 fw-bold"><i class="bi bi-geo-alt-fill me-1"></i>Colegios de Costa Rica</h6>
-      <small class="opacity-75">{{ total_colegios }} colegios con coordenadas</small>
+      <div class="d-flex justify-content-between align-items-center mt-1">
+        <small class="opacity-75" id="header-count">{{ total_colegios }} colegios</small>
+        <small class="opacity-75" id="header-source" style="font-size:10px">
+          {% if data_info.es_original %}
+            <i class="bi bi-exclamation-circle me-1"></i>Sin actualizar
+          {% else %}
+            <i class="bi bi-cloud-check-fill me-1"></i>{{ data_info.actualizado }}
+          {% endif %}
+        </small>
+      </div>
     </div>
 
     <div id="sidebar-body">
@@ -203,7 +226,11 @@
   let settingStart = false;
 
   // ── Map ────────────────────────────────────────────────────────────
-  const map = L.map('map', { zoomControl: true }).setView([9.95, -84.2], 8);
+  // Canvas renderer: draws all circle markers on a single <canvas> element.
+  // Drastically faster than SVG when rendering 5000+ points.
+  const canvasRenderer = L.canvas({ padding: 0.5 });
+
+  const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([9.95, -84.2], 8);
 
   L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
@@ -248,16 +275,29 @@
       : { radius: 5,  color: '#1565c0', fillColor: '#1976d2', fillOpacity: 0.55, weight: 1 };
   }
 
+  function tooltipHtml(s) {
+    const addr = s.direccion ? `<br><span style="color:#555">📍 ${esc(s.direccion)}</span>` : '';
+    return (
+      `<b style="font-size:13px">${esc(s.nombre)}</b>` +
+      addr +
+      `<br><span style="color:#777;font-size:11px">${esc(s.canton)}, ${esc(s.provincia)}</span>` +
+      `<br><span style="color:#999;font-size:11px">🌐 ${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</span>`
+    );
+  }
+
   function renderMarkers() {
     markerLayer.clearLayers();
     allSchools.forEach(s => {
       const isSel = selected.has(s.nombre);
-      const m = L.circleMarker([s.lat, s.lon], schoolStyle(isSel));
-      m.bindPopup(
-        `<b>${esc(s.nombre)}</b><br>` +
-        `<span class="text-muted">${esc(s.canton)}, ${esc(s.provincia)}</span>` +
-        (isSel ? '<br><em style="color:#e53935">✓ Seleccionado</em>' : '')
-      );
+      const m = L.circleMarker([s.lat, s.lon], {
+        ...schoolStyle(isSel),
+        renderer: canvasRenderer,
+      });
+      // Hover tooltip: name + address + coordinates
+      m.bindTooltip(tooltipHtml(s), {
+        sticky: true, direction: 'top', opacity: 0.95,
+        className: 'school-tooltip',
+      });
       m.on('click', () => toggleSelect(s.nombre));
       markerLayer.addLayer(m);
     });
@@ -519,9 +559,14 @@
       status.className = 'small mt-1 text-success';
       status.innerHTML =
         `<i class="bi bi-check-circle-fill me-1"></i>` +
-        `<b>${data.total}</b> colegios actualizados ` +
+        `<b>${data.total}</b> colegios cargados ` +
         `(${data.publicos} públicos · ${data.privados} privados)<br>` +
         `<span class="text-muted">${data.archivo}</span>`;
+
+      // Update header without page reload
+      document.getElementById('header-count').textContent = `${data.total} colegios`;
+      document.getElementById('header-source').innerHTML =
+        `<i class="bi bi-cloud-check-fill me-1"></i>Recién actualizado`;
 
       // Reload the map with fresh data
       loadFiltered();
