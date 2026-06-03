@@ -76,6 +76,42 @@ https://services1.arcgis.com/aWQmxJWy7lM2Qqmo/ArcGIS/rest/services/CE_Publicos_C
 | `FeatureServer/1` | CE_PUBLICOS — centros educativos públicos | ~4 667 |
 | `FeatureServer/0` | CE_PRIVADO — centros educativos privados | ~592 |
 
+### Campos que se guardan en el Excel
+
+Cada registro descargado del ArcGIS se normaliza y guarda con las siguientes columnas:
+
+| Campo | Descripción | Ejemplo |
+|---|---|---|
+| `NOMBRE` | Nombre del centro educativo | `ABRAHAM LINCOLN` |
+| `CODSABER` | Código único MEP (identificador oficial) | `100567-00` |
+| `CODPRES` | Código presupuestario | `358` |
+| `CORREO` | Correo electrónico institucional | `esc.abrahamlincoln@mep.go.cr` |
+| `PROVINCIA` | Provincia | `SAN JOSE` |
+| `CANTON` | Cantón | `ESCAZU` |
+| `DISTRITO` | Distrito | `SAN ANTONIO` |
+| `POBLADO` | Poblado o comunidad | `EL CARMEN` |
+| `DIRECCION` | Dirección física | `25 SUR DE IGLESIA CATÓLICA` |
+| `TIPO` | Tipo de institución (`PÚBLICO` / `PRIVADO`) | `PÚBLICO` |
+| `ESTADO` | Estado del centro (`ACTIVO` / `INACTIVO`) | `ACTIVO` |
+| `REGIONAL` | Dirección regional del MEP | `DIRECCIÓN REGIONAL SAN JOSÉ OESTE` |
+| `CIRCUITO` | Circuito educativo | `CIRCUITO 03` |
+| `LATITUD` | Latitud decimal (WGS84) | `9.896753` |
+| `LONGITUD` | Longitud decimal (WGS84) | `-84.141212` |
+| `FUENTE` | Origen del registro (`publico` / `privado`) | `publico` |
+
+### Cómo se muestran los códigos en el mapa
+
+Al pasar el cursor sobre cualquier punto del mapa aparece un tooltip con:
+
+```
+Nombre del Colegio
+📍 Dirección física
+Cantón, PROVINCIA
+CODSABER: 100567-00  |  CODPRES: 358
+✉ correo@mep.go.cr
+🌐 9.89675, -84.14121
+```
+
 ### Cómo funciona la descarga
 
 Al pulsar el botón **Actualizar datos MEP**:
@@ -85,7 +121,7 @@ Al pulsar el botón **Actualizar datos MEP**:
 3. Cada layer se descarga con paginación automática (`resultOffset` / `resultRecordCount`) de 1 000 registros por página.
 4. Los parámetros usados en cada petición:
    - `where=1=1` — trae todos los registros sin filtro
-   - `outFields=*` — devuelve todos los campos
+   - `outFields=*` — devuelve todos los campos (incluye CODSABER, CODPRES, CORREO)
    - `returnGeometry=true` — incluye las coordenadas del punto
    - `outSR=4326` — coordenadas en WGS84 (latitud/longitud decimal estándar)
    - `f=json` — respuesta en formato JSON de ArcGIS

@@ -79,6 +79,9 @@ def get_dataframe():
 
     rename_map = {
         'NOMBRE':     'nombre',
+        'CODSABER':   'codsaber',
+        'CODPRES':    'codpres',
+        'CORREO':     'correo',
         'PROVINCIA':  'provincia',
         'CANTON':     'canton',
         'DISTRITO':   'distrito',
@@ -92,7 +95,8 @@ def get_dataframe():
     # Ensure all text columns exist, converting NaN → '' before str operations.
     # Note: in pandas 3.x, astype(str) does NOT convert float NaN to 'nan'.
     # fillna('') must come first.
-    for col in ['nombre', 'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'direccion', 'poblado']:
+    for col in ['nombre', 'codsaber', 'codpres', 'correo',
+                'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'direccion', 'poblado']:
         if col not in df.columns:
             df[col] = ''
         df[col] = df[col].fillna('').astype(str).str.strip()
@@ -105,7 +109,8 @@ def get_dataframe():
         lambda r: r['direccion'] if r['direccion'] else r['poblado'], axis=1
     )
 
-    return df[['nombre', 'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'direccion', 'lat', 'lon']]
+    return df[['nombre', 'codsaber', 'codpres', 'correo',
+               'provincia', 'canton', 'distrito', 'zona', 'dependencia', 'direccion', 'lat', 'lon']]
 
 
 # ── MEP ArcGIS fetch & save ────────────────────────────────────────────────────
@@ -150,6 +155,9 @@ def _feature_to_row(feature, fuente):
     attrs = feature.get('attributes') or {}
     return {
         'NOMBRE':    attrs.get('CENTRO_EDU') or '',
+        'CODSABER':  attrs.get('CODSABER') or '',   # código único MEP (ej. 100517-00)
+        'CODPRES':   attrs.get('CODPRES') or '',    # código presupuestario
+        'CORREO':    attrs.get('CORREO') or '',     # correo institucional
         'PROVINCIA': attrs.get('PROVINCIA') or '',
         'CANTON':    attrs.get('CANTON') or '',
         'DISTRITO':  attrs.get('DISTRITO') or '',
@@ -159,7 +167,7 @@ def _feature_to_row(feature, fuente):
         'ESTADO':    attrs.get('ESTADO') or '',
         'REGIONAL':  attrs.get('REGIONAL') or '',
         'CIRCUITO':  attrs.get('CIRCUITO') or '',
-        'LATITUD':   geom.get('y'),   # already decimal degrees (outSR=4326)
+        'LATITUD':   geom.get('y'),   # decimal degrees (outSR=4326)
         'LONGITUD':  geom.get('x'),
         'FUENTE':    fuente,
     }

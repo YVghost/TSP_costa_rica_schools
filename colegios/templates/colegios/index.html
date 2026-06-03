@@ -276,12 +276,22 @@
   }
 
   function tooltipHtml(s) {
-    const addr = s.direccion ? `<br><span style="color:#555">📍 ${esc(s.direccion)}</span>` : '';
+    const addr    = s.direccion ? `<br><span style="color:#555">📍 ${esc(s.direccion)}</span>` : '';
+    const correo  = s.correo    ? `<br><span style="color:#1565c0;font-size:11px">✉ ${esc(s.correo)}</span>` : '';
+    const codigos = (s.codsaber || s.codpres)
+      ? `<br><span style="color:#888;font-size:10px">` +
+        `${s.codsaber ? 'CODSABER: <b>' + esc(s.codsaber) + '</b>' : ''}` +
+        `${s.codsaber && s.codpres ? ' &nbsp;|&nbsp; ' : ''}` +
+        `${s.codpres  ? 'CODPRES: <b>'  + esc(s.codpres)  + '</b>' : ''}` +
+        `</span>`
+      : '';
     return (
       `<b style="font-size:13px">${esc(s.nombre)}</b>` +
       addr +
       `<br><span style="color:#777;font-size:11px">${esc(s.canton)}, ${esc(s.provincia)}</span>` +
-      `<br><span style="color:#999;font-size:11px">🌐 ${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</span>`
+      codigos +
+      correo +
+      `<br><span style="color:#aaa;font-size:10px">🌐 ${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</span>`
     );
   }
 

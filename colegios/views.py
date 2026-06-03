@@ -52,7 +52,8 @@ def api_colegios(request):
         ]
 
     records = (
-        filtered[['nombre', 'provincia', 'canton', 'zona', 'direccion', 'lat', 'lon']]
+        filtered[['nombre', 'codsaber', 'codpres', 'correo',
+                  'provincia', 'canton', 'zona', 'direccion', 'lat', 'lon']]
         .sort_values('nombre')
         .fillna('')          # NaN in any text column would break JSON serialization
         .to_dict('records')
