@@ -61,6 +61,57 @@ Una vez determinado el orden óptimo, se llama al endpoint **Route** de OSRM par
 
 ---
 
+## Planificador de grupos (VRP multi-depot)
+
+El tab **Grupos** permite planificar visitas para múltiples equipos de trabajo que pueden partir desde distintos colegios.
+
+### Cómo funciona
+
+1. Seleccioná el número de grupos (1–8).
+2. Asigná un **punto de partida distinto a cada grupo**: hacé click en una fila del panel para activarla, luego buscá el colegio por nombre o hacé click directamente en el mapa. El colegio asignado se pinta en el mapa con el color de su grupo.
+3. Si un grupo no tiene inicio asignado, usa el mismo punto que el Grupo 1.
+4. Ajustá los minutos por visita y las horas de jornada.
+5. Presioná **Calcular rutas de grupos**.
+
+### Algoritmo: VRP greedy multi-depot
+
+El Problema de Ruteo de Vehículos (VRP) es una generalización del TSP: múltiples agentes que deben visitar un conjunto de destinos partiendo cada uno desde su propio depot.
+
+**Construcción de la matriz de distancias**
+
+La matriz incluye todos los depots (uno por grupo) y todos los candidatos:
+
+```
+Índices: [depot_0, depot_1, ..., depot_{K-1}, escuela_0, escuela_1, ..., escuela_{M-1}]
+```
+
+El grupo `g` parte siempre del índice `g` y regresa a él.
+
+**Filtro de candidatos**
+
+Se pre-filtran los colegios alcanzables desde al menos un depot dentro del radio:
+
+```
+radio_máximo = velocidad_promedio × (horas_jornada / 2)
+```
+
+**Asignación greedy round-robin**
+
+Se itera sobre los grupos de forma cíclica. En cada turno, el grupo `g` selecciona el colegio no asignado más cercano a su posición actual que todavía quepa en su presupuesto de tiempo:
+
+```
+delta = drive(cur → i) + minutos_visita + drive(i → depot_g) − drive(cur → depot_g)
+group_time[g] + delta ≤ jornada_máxima
+```
+
+**Optimización por grupo (TSP)**
+
+Una vez asignados los colegios, se aplica el TSP (fuerza bruta o vecino más cercano según el tamaño) para ordenar el recorrido de cada grupo de forma óptima desde su depot.
+
+**Velocidad promedio estimada**: 40 km/h. Los tiempos son aproximados.
+
+---
+
 ## Fuente de datos y actualización
 
 ### Portal ArcGIS del MEP
@@ -77,8 +128,6 @@ https://services1.arcgis.com/aWQmxJWy7lM2Qqmo/ArcGIS/rest/services/CE_Publicos_C
 | `FeatureServer/0` | CE_PRIVADO — centros educativos privados | ~592 |
 
 ### Campos que se guardan en el Excel
-
-Cada registro descargado del ArcGIS se normaliza y guarda con las siguientes columnas:
 
 | Campo | Descripción | Ejemplo |
 |---|---|---|
@@ -99,7 +148,7 @@ Cada registro descargado del ArcGIS se normaliza y guarda con las siguientes col
 | `LONGITUD` | Longitud decimal (WGS84) | `-84.141212` |
 | `FUENTE` | Origen del registro (`publico` / `privado`) | `publico` |
 
-### Cómo se muestran los códigos en el mapa
+### Cómo se muestran los datos en el mapa
 
 Al pasar el cursor sobre cualquier punto del mapa aparece un tooltip con:
 
@@ -112,26 +161,19 @@ CODSABER: 100567-00  |  CODPRES: 358
 🌐 9.89675, -84.14121
 ```
 
+Los colegios asignados como punto de partida de un grupo se muestran con el color de ese grupo.
+
 ### Cómo funciona la descarga
 
 Al pulsar el botón **Actualizar datos MEP**:
 
 1. Se realiza una petición POST a `/api/actualizar-datos/`.
 2. Django llama a `fetch_and_save_schools()` en `utils.py`, que itera los dos layers.
-3. Cada layer se descarga con paginación automática (`resultOffset` / `resultRecordCount`) de 1 000 registros por página.
-4. Los parámetros usados en cada petición:
-   - `where=1=1` — trae todos los registros sin filtro
-   - `outFields=*` — devuelve todos los campos (incluye CODSABER, CODPRES, CORREO)
-   - `returnGeometry=true` — incluye las coordenadas del punto
-   - `outSR=4326` — coordenadas en WGS84 (latitud/longitud decimal estándar)
-   - `f=json` — respuesta en formato JSON de ArcGIS
-5. Las coordenadas se extraen directamente de `geometry.x` (longitud) y `geometry.y` (latitud), que ya vienen en grados decimales porque se especificó `outSR=4326`.
-6. Se normaliza el encoding del texto (el servidor puede responder en Latin-1 en lugar de UTF-8).
-7. Se guardan dos archivos Excel en `data/coordinates/`:
+3. Cada layer se descarga con paginación automática de 1 000 registros por página.
+4. Se guardan dos archivos Excel en `data/coordinates/`:
    - `colegios_cr_YYYYMMDD_HHMMSS.xlsx` — registro histórico con timestamp
    - `colegios_cr_latest.xlsx` — el que usa la app en todo momento
-8. Se invalida el caché de `get_dataframe()` para que la próxima carga use los datos frescos.
-9. El encabezado del sidebar se actualiza con el nuevo total y la fecha de actualización, sin recargar la página.
+5. Se invalida el caché de `get_dataframe()` para que la próxima carga use los datos frescos.
 
 ### Prioridad de fuente de datos al iniciar
 
@@ -140,8 +182,6 @@ data/coordinates/colegios_cr_latest.xlsx   ← si existe, se usa este
         ↓ si no existe
 Gonglomerados_colegios_ipec_cindea_coned.xlsx  ← fallback (Excel original, 691 registros)
 ```
-
-El encabezado muestra `☁ DD/MM/YYYY HH:MM` cuando usa datos del MEP, o `⚠ Sin actualizar` cuando usa el fallback.
 
 ---
 
@@ -182,8 +222,26 @@ Al iniciar por primera vez sin datos descargados, pulsá **Actualizar datos MEP*
 |---|---|---|
 | `GET` | `/` | Página principal con mapa |
 | `GET` | `/api/colegios/` | Lista de colegios (acepta `?provincia=` y `?q=`) |
-| `POST` | `/api/ruta/` | Calcula la ruta óptima (`nombres[]`, `punto_partida` opcional) |
+| `POST` | `/api/ruta/` | Calcula la ruta óptima TSP (`escuelas[]`, `punto_partida` opcional) |
+| `POST` | `/api/planificar-grupos/` | VRP multi-depot: rutas para N grupos con inicio propio |
 | `POST` | `/api/actualizar-datos/` | Descarga datos frescos del MEP ArcGIS |
+
+### `POST /api/planificar-grupos/`
+
+```json
+{
+  "num_grupos": 3,
+  "starts": [
+    { "nombre": "Colegio A", "lat": 9.93, "lon": -84.08 },
+    { "nombre": "Colegio B", "lat": 9.85, "lon": -83.91 },
+    { "nombre": "Colegio C", "lat": 10.01, "lon": -84.21 }
+  ],
+  "minutos_por_visita": 45,
+  "horas_jornada": 10
+}
+```
+
+Si `starts` tiene menos entradas que `num_grupos`, el primer punto se repite para los grupos restantes.
 
 ## Estructura del proyecto
 
@@ -200,7 +258,7 @@ camino_menor_peso/
 │   ├── settings.py
 │   └── urls.py
 └── colegios/             # Aplicación principal
-    ├── utils.py          # Datos, normalización, OSRM, algoritmos TSP, fetch ArcGIS
+    ├── utils.py          # Datos, normalización, OSRM, algoritmos TSP/VRP, fetch ArcGIS
     ├── views.py          # Endpoints de la API
     ├── urls.py
     └── templates/
