@@ -217,34 +217,31 @@ GROUP_COLORS = ['#e53935', '#1976d2', '#388e3c', '#f57c00',
                 '#7b1fa2', '#00838f', '#c2185b', '#5d4037']
 
 
-def plan_group_visits(start_coords, num_groups, minutes_per_visit,
-                      hours_workday, df, avg_speed_kmh=40):
+def plan_group_visits(start_coords_list, num_groups, minutes_per_visit,
+                      hours_workday, df, avg_speed_kmh=40, start_names=None):
     """
-    Greedy VRP: assign schools to G groups departing from start_coords.
+    Multi-depot VRP: each group departs from its own start_coords_list[g].
 
-    Strategy
-    --------
-    * Pre-filter candidates within reachable distance (Haversine radius).
-    * Build road-distance matrix via OSRM (Haversine fallback).
-    * Round-robin greedy: for each group pick the nearest unassigned school
-      that still fits within the time budget (drive + visit + return).
-    * TSP-optimise each group's final school list.
-    * Fetch road geometry from OSRM for map display.
+    Matrix layout: [depot_0, ..., depot_{K-1}, school_0, ..., school_{M-1}]
+    Group g's depot is always at index g in the matrix.
 
     Time model
     ----------
-    group_time[g] = total committed time including return to base.
-    Adding school i from position cur:
-        delta = drive(cur→i) + visit + drive(i→start) − drive(cur→start)
+    group_time[g] = committed time including return to depot g.
+    delta when adding school i from cur:
+        drive(cur→i) + visit + drive(i→depot_g) − drive(cur→depot_g)
     """
     max_min = hours_workday * 60
+    K = len(start_coords_list)  # number of depots (== num_groups)
 
-    # ── 1. Pre-filter reachable schools ───────────────────────────────
-    # At avg_speed, in half the workday (round trip), max radius:
+    # ── 1. Pre-filter reachable schools (from the nearest depot) ─────
     max_radius_km = avg_speed_kmh * (hours_workday / 2)
     df = df.copy()
-    df['_d'] = df.apply(lambda r: haversine(*start_coords, r['lat'], r['lon']), axis=1)
-    limit = min(num_groups * 30, 120)          # keep matrix manageable
+    df['_d'] = df.apply(
+        lambda r: min(haversine(*sc, r['lat'], r['lon']) for sc in start_coords_list),
+        axis=1,
+    )
+    limit = min(num_groups * 30, 120)
     candidates = (df[df['_d'] <= max_radius_km]
                   .sort_values('_d')
                   .head(limit)
@@ -254,7 +251,7 @@ def plan_group_visits(start_coords, num_groups, minutes_per_visit,
         return []
 
     # ── 2. Distance matrix ────────────────────────────────────────────
-    all_coords = [start_coords] + list(zip(candidates['lat'], candidates['lon']))
+    all_coords = list(start_coords_list) + list(zip(candidates['lat'], candidates['lon']))
     N = len(all_coords)
     matrix = get_osrm_matrix(all_coords)
     if matrix is None:
@@ -267,34 +264,35 @@ def plan_group_visits(start_coords, num_groups, minutes_per_visit,
     # ── 3. Greedy round-robin VRP ─────────────────────────────────────
     assigned   = [False] * len(candidates)
     group_path = [[] for _ in range(num_groups)]
-    # group_time[g] = committed time INCLUDING return-to-base leg
     group_time = [0.0] * num_groups
-    group_last = [0]   * num_groups   # coord index (0 = start)
+    group_last = list(range(K))   # group g starts at depot index g
 
     improved = True
     while improved:
         improved = False
         for g in range(num_groups):
             best_i, best_delta = None, float('inf')
-            cur = group_last[g]
+            cur   = group_last[g]
+            depot = g                # depot index for group g
             for i, _ in enumerate(candidates.itertuples()):
                 if assigned[i]:
                     continue
-                ci = i + 1
-                old_ret   = drive_min(cur, 0)
-                drive_to  = drive_min(cur, ci)
-                new_ret   = drive_min(ci,  0)
-                delta     = drive_to + minutes_per_visit + new_ret - old_ret
+                ci       = K + i    # school index in the combined matrix
+                old_ret  = drive_min(cur, depot)
+                drive_to = drive_min(cur, ci)
+                new_ret  = drive_min(ci,  depot)
+                delta    = drive_to + minutes_per_visit + new_ret - old_ret
                 if group_time[g] + delta <= max_min and drive_to < best_delta:
                     best_delta = drive_to
                     best_i     = i
 
             if best_i is not None:
-                ci        = best_i + 1
-                cur       = group_last[g]
-                old_ret   = drive_min(cur, 0)
-                drive_to  = drive_min(cur, ci)
-                new_ret   = drive_min(ci,  0)
+                ci       = K + best_i
+                cur      = group_last[g]
+                depot    = g
+                old_ret  = drive_min(cur, depot)
+                drive_to = drive_min(cur, ci)
+                new_ret  = drive_min(ci,  depot)
                 group_time[g] += drive_to + minutes_per_visit + new_ret - old_ret
                 group_last[g]  = ci
                 group_path[g].append(best_i)
@@ -304,24 +302,26 @@ def plan_group_visits(start_coords, num_groups, minutes_per_visit,
     # ── 4. TSP-optimise + geometry per group ─────────────────────────
     result = []
     for g_idx in range(num_groups):
-        school_idxs = group_path[g_idx]
+        school_idxs  = group_path[g_idx]
+        depot_coords = start_coords_list[g_idx]
+        depot_name   = (start_names[g_idx] if start_names else None) or f'Grupo {g_idx + 1}'
 
         if not school_idxs:
             result.append({
-                'grupo': g_idx + 1,
-                'color': GROUP_COLORS[g_idx % len(GROUP_COLORS)],
-                'colegios': [], 'num_colegios': 0,
-                'distancia_km': 0, 'tiempo_total_min': 0,
+                'grupo':                g_idx + 1,
+                'color':                GROUP_COLORS[g_idx % len(GROUP_COLORS)],
+                'colegios':             [], 'num_colegios': 0,
+                'distancia_km':         0,  'tiempo_total_min': 0,
                 'tiempo_conduccion_min': 0, 'tiempo_visitas_min': 0,
-                'geometry': None,
+                'geometry':             None,
             })
             continue
 
-        grp_coords = [start_coords] + [
+        grp_coords = [depot_coords] + [
             (candidates.iloc[i]['lat'], candidates.iloc[i]['lon'])
             for i in school_idxs
         ]
-        all_idx    = [0] + [i + 1 for i in school_idxs]
+        all_idx    = [g_idx] + [K + i for i in school_idxs]
         sub_matrix = [[matrix[a][b] for b in all_idx] for a in all_idx]
 
         path, total_km, _ = solve_tsp(grp_coords, sub_matrix)
@@ -337,8 +337,10 @@ def plan_group_visits(start_coords, num_groups, minutes_per_visit,
         for order, p in enumerate(path):
             if p == 0:
                 colegios.append({
-                    'orden': order + 1, 'nombre': 'Punto de partida',
-                    'lat': start_coords[0], 'lon': start_coords[1],
+                    'orden':     order + 1,
+                    'nombre':    depot_name,
+                    'lat':       depot_coords[0],
+                    'lon':       depot_coords[1],
                     'es_inicio': True,
                 })
             else:

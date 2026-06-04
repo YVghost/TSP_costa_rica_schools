@@ -249,22 +249,23 @@
           </div>
         </div>
 
-        <!-- Colegio de partida -->
-        <div class="mb-3 position-relative">
-          <label class="form-label small fw-semibold mb-1">Colegio de partida</label>
-          <div class="input-group input-group-sm">
-            <span class="input-group-text"><i class="bi bi-building"></i></span>
-            <input type="text" id="grp-start-input" class="form-control"
-                   placeholder="Escribí el nombre…" autocomplete="off">
-            <button class="btn btn-outline-secondary" id="grp-clear-start-btn" type="button" title="Quitar colegio de inicio">
-              <i class="bi bi-x"></i>
-            </button>
-          </div>
-          <div id="grp-start-list"
-               class="list-group shadow-sm position-absolute w-100 d-none"
-               style="z-index:1000;max-height:160px;overflow-y:auto;top:calc(100% - 2px)"></div>
-          <div id="grp-start-info" class="small text-success mt-1 d-none">
-            <i class="bi bi-check-circle-fill me-1"></i><span id="grp-start-name"></span>
+        <!-- Puntos de partida por grupo -->
+        <div class="mb-3">
+          <label class="form-label small fw-semibold mb-1">
+            Puntos de partida
+            <small class="text-muted fw-normal">— uno por grupo</small>
+          </label>
+          <div id="grp-starts-list" class="mb-1"></div>
+          <div class="position-relative">
+            <div class="input-group input-group-sm">
+              <span class="input-group-text py-0 px-2" id="grp-assign-label"
+                    style="font-size:10px;color:white;white-space:nowrap;transition:background .2s">Grupo 1</span>
+              <input type="text" id="grp-start-input" class="form-control"
+                     placeholder="Buscar colegio…" autocomplete="off">
+            </div>
+            <div id="grp-start-list"
+                 class="list-group shadow-sm position-absolute w-100 d-none"
+                 style="z-index:1000;max-height:160px;overflow-y:auto;top:calc(100% - 2px)"></div>
           </div>
         </div>
 
@@ -418,11 +419,11 @@
   }
 
   // ── Render markers ─────────────────────────────────────────────────
-  function schoolStyle(isSel, grp) {
+  function schoolStyle(isSel, grpColor) {
     if (isSel)
-      return { radius: 9, color: '#b71c1c', fillColor: '#e53935', fillOpacity: 1, weight: 2 };
-    if (grp)
-      return { radius: 7, color: grp.color, fillColor: grp.color, fillOpacity: 0.75, weight: 2 };
+      return { radius: 9,  color: '#b71c1c',  fillColor: '#e53935', fillOpacity: 1,    weight: 2 };
+    if (grpColor)
+      return { radius: 10, color: grpColor,   fillColor: grpColor,  fillOpacity: 0.95, weight: 2.5 };
     return { radius: 5, color: '#1565c0', fillColor: '#1976d2', fillOpacity: 0.55, weight: 1 };
   }
 
@@ -452,8 +453,9 @@
   function renderMarkers() {
     markerLayer.clearLayers();
     allSchools.forEach(s => {
-      const isSel = selected.has(schoolKey(s));
-      const m = L.circleMarker([s.lat, s.lon], schoolStyle(isSel));
+      const isSel    = selected.has(schoolKey(s));
+      const grpColor = getGrpStartColor(s);
+      const m = L.circleMarker([s.lat, s.lon], schoolStyle(isSel, grpColor));
       m.bindTooltip(tooltipHtml(s), {
         sticky: true, direction: 'top', opacity: 0.95,
         className: 'school-tooltip',
@@ -494,7 +496,7 @@
   function toggleSelect(school) {
     // If Tab 2 (Grupos) is active: clicking a school sets it as the group start point
     if (document.getElementById('tab-grupos').classList.contains('show')) {
-      selectGrpStart(school);
+      assignGrpStart(school);
       return;
     }
     // Tab 1: toggle selection using unique key (avoids same-name conflicts)
@@ -537,13 +539,6 @@
 
   document.getElementById('btn-clear-start').addEventListener('click', clearStart);
 
-  // ── Clear start (Tab 2) ─────────────────────────────────────────
-  document.getElementById('grp-clear-start-btn').addEventListener('click', () => {
-    grpStartSchool = null;
-    document.getElementById('grp-start-input').value = '';
-    document.getElementById('grp-start-info').classList.add('d-none');
-    updateGrpCalcBtn();
-  });
 
   function clearStart() {
     if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
@@ -725,11 +720,14 @@
   // Tab 2 — Planificador de grupos (VRP)
   // ══════════════════════════════════════════════════════════════════
 
-  let grpNumGrupos    = 2;
-  let grpMinVisita    = 45;
-  let grpHoras        = 10;
-  let grpStartSchool  = null;   // {nombre, lat, lon}
-  let groupLayers     = [];
+  const GROUP_COLORS = ['#e53935','#1976d2','#388e3c','#f57c00','#7b1fa2','#00838f','#c2185b','#5d4037'];
+
+  let grpNumGrupos      = 2;
+  let grpStartSchools   = [null, null];  // one slot per group
+  let activeGrpIdx      = 0;             // which group is being assigned
+  let grpMinVisita      = 45;
+  let grpHoras          = 10;
+  let groupLayers       = [];
 
   // ── Group count buttons ──
   document.querySelectorAll('.grp-count').forEach(btn => {
@@ -741,9 +739,84 @@
       this.classList.add('active', 'btn-danger');
       this.classList.remove('btn-outline-secondary');
       grpNumGrupos = parseInt(this.dataset.val);
+      // Resize the starts array: keep existing assignments, pad with null
+      grpStartSchools = Array.from({ length: grpNumGrupos }, (_, i) => grpStartSchools[i] ?? null);
+      if (activeGrpIdx >= grpNumGrupos) activeGrpIdx = 0;
+      renderGrpStartRows();
+      renderMarkers();
       updateGrpCalcBtn();
     });
   });
+
+  // ── Helper: get the group color for a school if it's a depot ──
+  function getGrpStartColor(s) {
+    const key = schoolKey(s);
+    const idx = grpStartSchools.findIndex(gs => gs && schoolKey(gs) === key);
+    return idx !== -1 ? GROUP_COLORS[idx % GROUP_COLORS.length] : null;
+  }
+
+  // ── Render the per-group start rows ──
+  function renderGrpStartRows() {
+    const el = document.getElementById('grp-starts-list');
+    el.innerHTML = '';
+    grpStartSchools.forEach((school, g) => {
+      const color    = GROUP_COLORS[g % GROUP_COLORS.length];
+      const isActive = g === activeGrpIdx;
+      const row      = document.createElement('div');
+      row.className  = 'd-flex align-items-center gap-1 mb-1 px-1 rounded small';
+      row.style.cssText = `cursor:pointer;min-height:26px;${isActive ? `background:#f5f5f5;border:1px solid ${color};` : ''}`;
+      row.innerHTML =
+        `<span class="badge me-1" style="background:${color};font-size:10px;flex-shrink:0">G${g + 1}</span>` +
+        `<span class="flex-fill text-truncate ${school ? 'fw-semibold' : 'text-muted fst-italic'}" style="font-size:11px">` +
+        (school ? esc(school.nombre) : 'Sin asignar') + `</span>` +
+        (school
+          ? `<button class="btn btn-sm p-0 px-1 text-secondary clear-grp-btn" type="button" data-g="${g}" style="line-height:1"><i class="bi bi-x"></i></button>`
+          : '');
+      // Click row → make active
+      row.addEventListener('click', e => {
+        if (e.target.closest('.clear-grp-btn')) return;
+        activeGrpIdx = g;
+        document.getElementById('grp-start-input').value = '';
+        document.getElementById('grp-start-input').focus();
+        renderGrpStartRows();
+      });
+      const clearBtn = row.querySelector('.clear-grp-btn');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+          grpStartSchools[parseInt(clearBtn.dataset.g)] = null;
+          if (activeGrpIdx === g) document.getElementById('grp-start-input').value = '';
+          renderGrpStartRows();
+          renderMarkers();
+          updateGrpCalcBtn();
+        });
+      }
+      el.appendChild(row);
+    });
+    // Keep the assign-label in sync
+    const color = GROUP_COLORS[activeGrpIdx % GROUP_COLORS.length];
+    const lbl   = document.getElementById('grp-assign-label');
+    lbl.textContent        = `Grupo ${activeGrpIdx + 1}`;
+    lbl.style.background   = color;
+    lbl.style.borderColor  = color;
+  }
+
+  // ── Assign a school to the active group and advance ──
+  function assignGrpStart(school) {
+    grpStartSchools[activeGrpIdx] = school;
+    document.getElementById('grp-start-input').value = '';
+    document.getElementById('grp-start-list').classList.add('d-none');
+    // Advance to next empty slot
+    const next       = grpStartSchools.findIndex((s, i) => i > activeGrpIdx && !s);
+    const firstEmpty = grpStartSchools.findIndex(s => !s);
+    activeGrpIdx = next !== -1 ? next : (firstEmpty !== -1 ? firstEmpty : activeGrpIdx);
+    renderGrpStartRows();
+    renderMarkers();
+    updateGrpCalcBtn();
+  }
+
+  function updateGrpCalcBtn() {
+    document.getElementById('grp-calc-btn').disabled = grpStartSchools.every(s => !s);
+  }
 
   // ── Sliders ──
   document.getElementById('grp-visit-range').addEventListener('input', function () {
@@ -770,7 +843,7 @@
       btn.type = 'button';
       btn.className = 'list-group-item list-group-item-action py-1 px-2 small';
       btn.innerHTML = `<b>${esc(s.nombre)}</b><br><span class="text-muted">${esc(s.canton)}, ${esc(s.provincia)}</span>`;
-      btn.addEventListener('click', () => selectGrpStart(s));
+      btn.addEventListener('click', () => assignGrpStart(s));
       grpDropdown.appendChild(btn);
     });
     grpDropdown.classList.remove('d-none');
@@ -781,20 +854,6 @@
       grpDropdown.classList.add('d-none');
   });
 
-  function selectGrpStart(school) {
-    grpStartSchool = school;
-    grpInput.value = school.nombre;
-    grpDropdown.classList.add('d-none');
-    document.getElementById('grp-start-name').textContent =
-      `${school.nombre} — ${school.canton}`;
-    document.getElementById('grp-start-info').classList.remove('d-none');
-    updateGrpCalcBtn();
-  }
-
-  function updateGrpCalcBtn() {
-    document.getElementById('grp-calc-btn').disabled = !grpStartSchool;
-  }
-
   // ── Calculate group routes ──
   document.getElementById('grp-calc-btn').addEventListener('click', async () => {
     const btn = document.getElementById('grp-calc-btn');
@@ -804,11 +863,15 @@
     document.getElementById('grp-results').classList.add('d-none');
 
     try {
+      // For groups without a start, broadcast the first assigned one
+      const firstStart = grpStartSchools.find(Boolean);
       const body = {
-        num_grupos:        grpNumGrupos,
-        colegio_inicio:    grpStartSchool.nombre,
+        num_grupos:         grpNumGrupos,
+        starts:             grpStartSchools.map(s => s || firstStart).map(s => ({
+                              nombre: s.nombre, lat: s.lat, lon: s.lon,
+                            })),
         minutos_por_visita: grpMinVisita,
-        horas_jornada:     grpHoras,
+        horas_jornada:      grpHoras,
       };
       const res  = await fetch('/api/planificar-grupos/', {
         method: 'POST',
@@ -873,8 +936,7 @@
     sumDiv.className = 'alert alert-success py-2 small mb-2';
     sumDiv.innerHTML =
       `<i class="bi bi-check-circle-fill me-1"></i>` +
-      `<b>${total} colegios</b> distribuidos en <b>${data.grupos.length} grupos</b>` +
-      ` desde <em>${esc(data.start_nombre)}</em>`;
+      `<b>${total} colegios</b> distribuidos en <b>${data.grupos.length} grupos</b>`;
     el.appendChild(sumDiv);
 
     data.grupos.forEach(g => {
@@ -956,6 +1018,7 @@
   });
 
   // ── Init ───────────────────────────────────────────────────────────
+  renderGrpStartRows();
   fetchSchools();
 
 })();

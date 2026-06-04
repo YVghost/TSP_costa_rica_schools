@@ -162,56 +162,50 @@ def api_ruta(request):
 @csrf_exempt
 @require_POST
 def api_planificar_grupos(request):
-    """VRP: plan optimised visit routes for multiple groups from a starting school."""
+    """Multi-depot VRP: each group departs from its own starting point."""
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
         return JsonResponse({'error': 'JSON inválido'}, status=400)
 
-    num_grupos        = int(data.get('num_grupos', 2))
-    colegio_inicio    = data.get('colegio_inicio', '').strip()
-    min_por_visita    = int(data.get('minutos_por_visita', 45))
-    horas_jornada     = float(data.get('horas_jornada', 10))
-    # Optional explicit start coordinates (if user placed a pin instead of picking a school)
-    start_lat = data.get('start_lat')
-    start_lon = data.get('start_lon')
+    num_grupos     = int(data.get('num_grupos', 2))
+    min_por_visita = int(data.get('minutos_por_visita', 45))
+    horas_jornada  = float(data.get('horas_jornada', 10))
+    starts_raw     = data.get('starts', [])   # [{nombre, lat, lon}, ...]
 
     if not (1 <= num_grupos <= 8):
         return JsonResponse({'error': 'Número de grupos debe ser entre 1 y 8'}, status=400)
+    if not starts_raw:
+        return JsonResponse({'error': 'Indicá al menos un punto de partida'}, status=400)
+
+    start_coords_list = [(float(s['lat']), float(s['lon'])) for s in starts_raw]
+    start_names       = [s.get('nombre', f'Grupo {i+1}') for i, s in enumerate(starts_raw)]
+
+    # Broadcast first start to fill groups that have no assigned depot
+    while len(start_coords_list) < num_grupos:
+        start_coords_list.append(start_coords_list[0])
+        start_names.append(start_names[0])
+    start_coords_list = start_coords_list[:num_grupos]
+    start_names       = start_names[:num_grupos]
 
     df = get_dataframe()
 
-    # Resolve start coordinates
-    if start_lat is not None and start_lon is not None:
-        start_coords = (float(start_lat), float(start_lon))
-        start_nombre = data.get('start_label', 'Punto de partida')
-    elif colegio_inicio:
-        match = df[df['nombre'] == colegio_inicio]
-        if match.empty:
-            return JsonResponse({'error': f'No se encontró el colegio: {colegio_inicio}'}, status=404)
-        row          = match.iloc[0]
-        start_coords = (float(row['lat']), float(row['lon']))
-        start_nombre = colegio_inicio
-    else:
-        return JsonResponse({'error': 'Indicá un colegio de partida o un punto en el mapa'}, status=400)
-
     try:
         grupos = plan_group_visits(
-            start_coords    = start_coords,
-            num_groups      = num_grupos,
+            start_coords_list = start_coords_list,
+            num_groups        = num_grupos,
             minutes_per_visit = min_por_visita,
-            hours_workday   = horas_jornada,
-            df              = df,
+            hours_workday     = horas_jornada,
+            df                = df,
+            start_names       = start_names,
         )
     except Exception as exc:
         return JsonResponse({'error': str(exc)}, status=500)
 
     total_colegios = sum(g['num_colegios'] for g in grupos)
     return JsonResponse({
-        'grupos':          grupos,
-        'total_colegios':  total_colegios,
-        'start_nombre':    start_nombre,
-        'start_coords':    list(start_coords),
+        'grupos':         grupos,
+        'total_colegios': total_colegios,
     })
 
 
