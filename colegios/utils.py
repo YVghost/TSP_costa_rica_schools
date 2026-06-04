@@ -211,6 +211,165 @@ def fetch_and_save_schools():
     }
 
 
+# ── Group-visit planner (VRP) ─────────────────────────────────────────────────
+
+GROUP_COLORS = ['#e53935', '#1976d2', '#388e3c', '#f57c00',
+                '#7b1fa2', '#00838f', '#c2185b', '#5d4037']
+
+
+def plan_group_visits(start_coords, num_groups, minutes_per_visit,
+                      hours_workday, df, avg_speed_kmh=40):
+    """
+    Greedy VRP: assign schools to G groups departing from start_coords.
+
+    Strategy
+    --------
+    * Pre-filter candidates within reachable distance (Haversine radius).
+    * Build road-distance matrix via OSRM (Haversine fallback).
+    * Round-robin greedy: for each group pick the nearest unassigned school
+      that still fits within the time budget (drive + visit + return).
+    * TSP-optimise each group's final school list.
+    * Fetch road geometry from OSRM for map display.
+
+    Time model
+    ----------
+    group_time[g] = total committed time including return to base.
+    Adding school i from position cur:
+        delta = drive(cur→i) + visit + drive(i→start) − drive(cur→start)
+    """
+    max_min = hours_workday * 60
+
+    # ── 1. Pre-filter reachable schools ───────────────────────────────
+    # At avg_speed, in half the workday (round trip), max radius:
+    max_radius_km = avg_speed_kmh * (hours_workday / 2)
+    df = df.copy()
+    df['_d'] = df.apply(lambda r: haversine(*start_coords, r['lat'], r['lon']), axis=1)
+    limit = min(num_groups * 30, 120)          # keep matrix manageable
+    candidates = (df[df['_d'] <= max_radius_km]
+                  .sort_values('_d')
+                  .head(limit)
+                  .reset_index(drop=True))
+
+    if candidates.empty:
+        return []
+
+    # ── 2. Distance matrix ────────────────────────────────────────────
+    all_coords = [start_coords] + list(zip(candidates['lat'], candidates['lon']))
+    N = len(all_coords)
+    matrix = get_osrm_matrix(all_coords)
+    if matrix is None:
+        matrix = [[haversine(*all_coords[i], *all_coords[j])
+                   for j in range(N)] for i in range(N)]
+
+    def drive_min(i, j):
+        return matrix[i][j] / avg_speed_kmh * 60
+
+    # ── 3. Greedy round-robin VRP ─────────────────────────────────────
+    assigned   = [False] * len(candidates)
+    group_path = [[] for _ in range(num_groups)]
+    # group_time[g] = committed time INCLUDING return-to-base leg
+    group_time = [0.0] * num_groups
+    group_last = [0]   * num_groups   # coord index (0 = start)
+
+    improved = True
+    while improved:
+        improved = False
+        for g in range(num_groups):
+            best_i, best_delta = None, float('inf')
+            cur = group_last[g]
+            for i, _ in enumerate(candidates.itertuples()):
+                if assigned[i]:
+                    continue
+                ci = i + 1
+                old_ret   = drive_min(cur, 0)
+                drive_to  = drive_min(cur, ci)
+                new_ret   = drive_min(ci,  0)
+                delta     = drive_to + minutes_per_visit + new_ret - old_ret
+                if group_time[g] + delta <= max_min and drive_to < best_delta:
+                    best_delta = drive_to
+                    best_i     = i
+
+            if best_i is not None:
+                ci        = best_i + 1
+                cur       = group_last[g]
+                old_ret   = drive_min(cur, 0)
+                drive_to  = drive_min(cur, ci)
+                new_ret   = drive_min(ci,  0)
+                group_time[g] += drive_to + minutes_per_visit + new_ret - old_ret
+                group_last[g]  = ci
+                group_path[g].append(best_i)
+                assigned[best_i] = True
+                improved = True
+
+    # ── 4. TSP-optimise + geometry per group ─────────────────────────
+    result = []
+    for g_idx in range(num_groups):
+        school_idxs = group_path[g_idx]
+
+        if not school_idxs:
+            result.append({
+                'grupo': g_idx + 1,
+                'color': GROUP_COLORS[g_idx % len(GROUP_COLORS)],
+                'colegios': [], 'num_colegios': 0,
+                'distancia_km': 0, 'tiempo_total_min': 0,
+                'tiempo_conduccion_min': 0, 'tiempo_visitas_min': 0,
+                'geometry': None,
+            })
+            continue
+
+        grp_coords = [start_coords] + [
+            (candidates.iloc[i]['lat'], candidates.iloc[i]['lon'])
+            for i in school_idxs
+        ]
+        all_idx    = [0] + [i + 1 for i in school_idxs]
+        sub_matrix = [[matrix[a][b] for b in all_idx] for a in all_idx]
+
+        path, total_km, _ = solve_tsp(grp_coords, sub_matrix)
+
+        geometry, road_km = get_osrm_geometry([grp_coords[p] for p in path])
+        if road_km:
+            total_km = road_km
+
+        drive_m = round(total_km / avg_speed_kmh * 60)
+        visit_m = len(school_idxs) * minutes_per_visit
+
+        colegios = []
+        for order, p in enumerate(path):
+            if p == 0:
+                colegios.append({
+                    'orden': order + 1, 'nombre': 'Punto de partida',
+                    'lat': start_coords[0], 'lon': start_coords[1],
+                    'es_inicio': True,
+                })
+            else:
+                row = candidates.iloc[school_idxs[p - 1]]
+                colegios.append({
+                    'orden':     order + 1,
+                    'nombre':    row['nombre'],
+                    'canton':    row['canton'],
+                    'provincia': row['provincia'],
+                    'codsaber':  row['codsaber'],
+                    'direccion': row['direccion'],
+                    'lat':       float(row['lat']),
+                    'lon':       float(row['lon']),
+                    'es_inicio': False,
+                })
+
+        result.append({
+            'grupo':                g_idx + 1,
+            'color':                GROUP_COLORS[g_idx % len(GROUP_COLORS)],
+            'colegios':             colegios,
+            'num_colegios':         len(school_idxs),
+            'distancia_km':         round(total_km, 1),
+            'tiempo_conduccion_min': drive_m,
+            'tiempo_visitas_min':   visit_m,
+            'tiempo_total_min':     drive_m + visit_m,
+            'geometry':             geometry,
+        })
+
+    return result
+
+
 # ── OSRM road-network calls ────────────────────────────────────────────────────
 
 def get_osrm_matrix(coords):

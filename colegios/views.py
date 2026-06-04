@@ -6,7 +6,8 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
-from .utils import get_dataframe, solve_tsp, get_osrm_matrix, get_osrm_geometry, fetch_and_save_schools
+from .utils import (get_dataframe, solve_tsp, get_osrm_matrix, get_osrm_geometry,
+                    fetch_and_save_schools, plan_group_visits)
 
 
 def _data_source_info():
@@ -69,17 +70,36 @@ def api_ruta(request):
     except json.JSONDecodeError:
         return JsonResponse({'error': 'JSON inválido'}, status=400)
 
-    nombres = data.get('nombres', [])
-    # punto_partida is optional: {lat, lon, label}
+    # Accept either:
+    #   escuelas: [{nombre, lat, lon, codsaber}]  ← new format (exact match by coordinate)
+    #   nombres:  [str, ...]                       ← legacy format (match by name, may duplicate)
+    escuelas      = data.get('escuelas', [])
+    nombres       = data.get('nombres', [])
     punto_partida = data.get('punto_partida')
 
-    if len(nombres) < 2:
+    count = len(escuelas) or len(nombres)
+    if count < 2:
         return JsonResponse({'error': 'Seleccioná al menos 2 colegios'}, status=400)
-    if len(nombres) > 14:
+    if count > 14:
         return JsonResponse({'error': 'Máximo 14 colegios por ruta'}, status=400)
 
     df = get_dataframe()
-    sel = df[df['nombre'].isin(nombres)].reset_index(drop=True)
+
+    if escuelas:
+        # Match by rounded lat/lon — guarantees exact school, not all with same name
+        import pandas as pd
+        df_c = df.copy()
+        df_c['_lat5'] = df_c['lat'].round(5)
+        df_c['_lon5'] = df_c['lon'].round(5)
+        lookup = pd.DataFrame([{
+            '_lat5': round(float(e['lat']), 5),
+            '_lon5': round(float(e['lon']), 5),
+        } for e in escuelas])
+        sel = (df_c.merge(lookup, on=['_lat5', '_lon5'])
+                   .drop(columns=['_lat5', '_lon5'])
+                   .reset_index(drop=True))
+    else:
+        sel = df[df['nombre'].isin(nombres)].reset_index(drop=True)
 
     if len(sel) < 2:
         return JsonResponse({'error': 'No se encontraron los colegios indicados'}, status=404)
@@ -136,6 +156,62 @@ def api_ruta(request):
         'algoritmo': algoritmo,
         'geometry': geometry,
         'usando_calles': usando_calles,
+    })
+
+
+@csrf_exempt
+@require_POST
+def api_planificar_grupos(request):
+    """VRP: plan optimised visit routes for multiple groups from a starting school."""
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'JSON inválido'}, status=400)
+
+    num_grupos        = int(data.get('num_grupos', 2))
+    colegio_inicio    = data.get('colegio_inicio', '').strip()
+    min_por_visita    = int(data.get('minutos_por_visita', 45))
+    horas_jornada     = float(data.get('horas_jornada', 10))
+    # Optional explicit start coordinates (if user placed a pin instead of picking a school)
+    start_lat = data.get('start_lat')
+    start_lon = data.get('start_lon')
+
+    if not (1 <= num_grupos <= 8):
+        return JsonResponse({'error': 'Número de grupos debe ser entre 1 y 8'}, status=400)
+
+    df = get_dataframe()
+
+    # Resolve start coordinates
+    if start_lat is not None and start_lon is not None:
+        start_coords = (float(start_lat), float(start_lon))
+        start_nombre = data.get('start_label', 'Punto de partida')
+    elif colegio_inicio:
+        match = df[df['nombre'] == colegio_inicio]
+        if match.empty:
+            return JsonResponse({'error': f'No se encontró el colegio: {colegio_inicio}'}, status=404)
+        row          = match.iloc[0]
+        start_coords = (float(row['lat']), float(row['lon']))
+        start_nombre = colegio_inicio
+    else:
+        return JsonResponse({'error': 'Indicá un colegio de partida o un punto en el mapa'}, status=400)
+
+    try:
+        grupos = plan_group_visits(
+            start_coords    = start_coords,
+            num_groups      = num_grupos,
+            minutes_per_visit = min_por_visita,
+            hours_workday   = horas_jornada,
+            df              = df,
+        )
+    except Exception as exc:
+        return JsonResponse({'error': str(exc)}, status=500)
+
+    total_colegios = sum(g['num_colegios'] for g in grupos)
+    return JsonResponse({
+        'grupos':          grupos,
+        'total_colegios':  total_colegios,
+        'start_nombre':    start_nombre,
+        'start_coords':    list(start_coords),
     })
 
 
